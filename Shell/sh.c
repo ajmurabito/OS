@@ -8,6 +8,8 @@
 #include <sys/stat.h>
 
 // Simplifed xv6 shell.
+//Must implement additional features to the shell
+
 
 #define MAXARGS 10
 
