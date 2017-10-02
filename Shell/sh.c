@@ -38,6 +38,12 @@ struct pipecmd {
   struct cmd *right; // right side of pipe
 };
 
+struct listcmd {
+  int type;
+  struct cmd *left;  //left command
+  struct cmd *right; //right command
+};
+
 int fork1(void);  // Fork but exits on failure.
 struct cmd *parsecmd(char*);
 
@@ -49,6 +55,7 @@ runcmd(struct cmd *cmd)
   struct execcmd *ecmd;
   struct pipecmd *pcmd;
   struct redircmd *rcmd;
+  struct listcmd *lcmd;
 
   if(cmd == 0)
     exit(0);
@@ -87,6 +94,14 @@ runcmd(struct cmd *cmd)
       dup2(p[0], 0);
       runcmd(pcmd->right); }
     break;
+
+  case ';':
+    lcmd = (struct listcmd*)cmd;
+    if (!fork()) runcmd(lcmd->left);   //child will execute first command, then parent second
+    else {
+      wait(&r);
+      runcmd(lcmd->right);
+    }
   }    
   exit(0);
 }
@@ -94,9 +109,9 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  
   if (isatty(fileno(stdin)))
     fprintf(stdout, "$ ");
+
   memset(buf, 0, nbuf);
   fgets(buf, nbuf, stdin);
   if(buf[0] == 0) // EOF
@@ -177,10 +192,22 @@ pipecmd(struct cmd *left, struct cmd *right)
   return (struct cmd*)cmd;
 }
 
+struct cmd* listcmd(struct cmd *left, struct cmd *right)
+{
+  struct listcmd *cmd;
+
+  cmd = malloc(sizeof(*cmd));
+  memset(cmd, 0, sizeof(*cmd));
+  cmd->type = ';';
+  cmd->left = left;
+  cmd->right = right;
+  return (struct cmd*)cmd;
+}
+
 // Parsing
 
 char whitespace[] = " \t\r\n\v";
-char symbols[] = "<|>";
+char symbols[] = "<|>;";
 
 int
 gettoken(char **ps, char *es, char **q, char **eq)
@@ -189,49 +216,51 @@ gettoken(char **ps, char *es, char **q, char **eq)
   int ret;
   
   s = *ps;
-  while(s < es && strchr(whitespace, *s))
+  while(s < es && strchr(whitespace, *s))  //skip all the whitespace characters
     s++;
-  if(q)
+  if(q)                                    //if q specified, q points to string s
     *q = s;
-  ret = *s;
+  ret = *s;                                //ret is the first non-white char
   switch(*s){
   case 0:
     break;
   case '|':
   case '<':
-    s++;
-    break;
   case '>':
+  case ';':
     s++;
     break;
-  default:
+  
+    break;
+  default:                                 //first character is not a symblol
     ret = 'a';
-    while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
+    while(s < es && !strchr(whitespace, *s) && !strchr(symbols, *s)) //skip the rest of the letters
       s++;
     break;
   }
-  if(eq)
+  if(eq)                                  //if eq specified, points to end of token
     *eq = s;
   
-  while(s < es && strchr(whitespace, *s))
+  while(s < es && strchr(whitespace, *s))  //skip the whitespace
     s++;
   *ps = s;
   return ret;
 }
 
 int
-peek(char **ps, char *es, char *toks)
+  peek(char **ps, char *es, char *toks)   
 {
   char *s;
   
-  s = *ps;
-  while(s < es && strchr(whitespace, *s))
+  s = *ps;                                //s holds place of beginning of buffer
+  while(s < es && strchr(whitespace, *s))   //skips the beginning whitespace chars
     s++;
-  *ps = s;
-  return *s && strchr(toks, *s);
+  *ps = s;                               //buffer beginning now skips whitespace
+  return *s && strchr(toks, *s);         //return first character and whether s is in toks 
 }
 
 struct cmd *parseline(char**, char*);
+struct cmd *parselist(char**, char*);
 struct cmd *parsepipe(char**, char*);
 struct cmd *parseexec(char**, char*);
 
@@ -254,13 +283,13 @@ parsecmd(char *s)
   char *es;
   struct cmd *cmd;
 
-  es = s + strlen(s);
+  es = s + strlen(s);               //es points to the end of string s
   cmd = parseline(&s, es);
   peek(&s, es, "");
   if(s != es){
     fprintf(stderr, "leftovers: %s\n", s);
     exit(-1);
-  }
+  } 
   return cmd;
 }
 
@@ -268,10 +297,27 @@ struct cmd*
 parseline(char **ps, char *es)
 {
   struct cmd *cmd;
-  cmd = parsepipe(ps, es);
+  cmd = parselist(ps, es);     
   return cmd;
 }
 
+struct cmd*
+parselist(char **ps, char *es)
+{
+
+  struct cmd *ret;
+  struct listcmd *cmd;
+
+  ret = parsepipe(ps, es);
+  if(peek(ps, es, ";")) {
+    gettoken(ps, es, 0, 0);
+    cmd = (struct listcmd*)listcmd(ret, parselist(ps, es));
+    ret = (struct cmd*)cmd;  }
+  
+  return ret;
+    
+}
+ 
 struct cmd*
 parsepipe(char **ps, char *es)
 {
@@ -286,12 +332,12 @@ parsepipe(char **ps, char *es)
 }
 
 struct cmd*
-parseredirs(struct cmd *cmd, char **ps, char *es)
+  parseredirs(struct cmd *cmd, char **ps, char *es)  //parsedirs takes a command
 {
   int tok;
   char *q, *eq;
 
-  while(peek(ps, es, "<>")){
+  while(peek(ps, es, "<>")){       //dont perform when first char is not <>
     tok = gettoken(ps, es, 0, 0);
     if(gettoken(ps, es, &q, &eq) != 'a') {
       fprintf(stderr, "missing file for redirection\n");
@@ -317,12 +363,12 @@ parseexec(char **ps, char *es)
   struct execcmd *cmd;
   struct cmd *ret;
   
-  ret = execcmd();
+  ret = execcmd();             
   cmd = (struct execcmd*)ret;
 
   argc = 0;
-  ret = parseredirs(ret, ps, es);
-  while(!peek(ps, es, "|")){
+  ret = parseredirs(ret, ps, es);  //does nothing if <> not next char
+  while(!peek(ps, es, "|;")){       //when youre not at | and not at the end
     if((tok=gettoken(ps, es, &q, &eq)) == 0)
       break;
     if(tok != 'a') {
@@ -335,8 +381,10 @@ parseexec(char **ps, char *es)
       fprintf(stderr, "too many args\n");
       exit(-1);
     }
-    ret = parseredirs(ret, ps, es);
+    ret = parseredirs(ret, ps, es);   //check if you have a redirection symbol
   }
   cmd->argv[argc] = 0;
   return ret;
 }
+
+ 
